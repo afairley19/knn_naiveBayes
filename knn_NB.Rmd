@@ -1,0 +1,519 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+Ashley Fairley
+03/2021
+
+## KNN and Naive Bayes Classifiers
+
+### Applying k-Nearest Neighbors to Predict Income
+
+**Data Exploration:**
+
+**Download the dataset, change the header names, and trim the white space:**
+```{r}
+adult <- read.table("adult.data", header = FALSE, sep = ",", strip.white = TRUE, na.string = "?")
+
+colnames(adult) <-c("age", "workclass", "final_weight", "education", "years_education", "marital_status", "occupation", "family_role", "ethnicity", "gender", "investment_gain", "investment_loss", "hours_per_week", "native_country", "income")
+```
+
+**Explore the overall structure of the dataset and get a summary of statistics for each variable. Are there any missing values?**
+
+There are six numeric variables and nine categorical variables. There are 4,262 entries listed as NA/missing values (originally indicated with a '?').  
+
+```{r}
+str(adult)
+summary(adult)
+sum(is.na(adult))
+```
+
+**Get the frequency table of the "income" variable. Is the data balanced?**
+
+The table is unbalanced. <=50K comprises approximately 76% of entries (>50K approximately 24%).  
+
+```{r}
+sum(is.na(adult$income))
+table(adult$income)
+```
+
+**Explore the data in order to investigate the association between income & other features. Which features seem most likely to be useful in predicting income?**
+
+```{r}
+i <- (adult$income)
+options(scipen = 999)
+library(gmodels)
+```
+
+*Numeric variables:*
+  
+- age: using t.test(), I found the p-value to be less than 0.01 (p-value < 0.00000000000000022), and therefore assume a correlation between age & income.
+- final_weight: using t.test(), there does not appear to be a correlation. p-value = 0.08167 > 0.01 & 0.05
+- years_education: The p-value is less than 0.01 (p-value < 0.00000000000000022), therefore I conclude a correlation between years of education & income.
+- investment_gain: I conclude a correlation between investment gains & income. p-value < 0.00000000000000022
+- investment_loss: Similarly to gains, I conclude a correlation between investment losses and income. p-value < 0.00000000000000022
+- hours_per_week: The p-value is less than 0.01 (p-value < 0.00000000000000022) and so I again conclude that there is a correlation between hours worked per week and income.
+
+```
+t.test(adult$age~i)
+t.test(adult$final_weight~i)
+t.test(adult$years_education~i)
+t.test(adult$investment_gain~i)
+t.test(adult$investment_loss~i)
+t.test(adult$hours_per_week~i)
+```
+
+*Categorical variables:*
+
+- workclass: The p-value is well below 0.01, therefore I conclude a correlation exists between work class & income.
+- education: P = 0, so I conclude a correlation between education and income.
+- marital_status: Again, p = 0, so I am concluding a correlation between marital status and income.
+- occupation: P = 0; I conclude there is a correlation between occupation & income.
+- family_role: P = 0, I conclude there is a correlation between family role and income.
+- ethnicity: The p-value is well below 0.01. I conclude there is a correlation between ethnicity & income.
+- gender: Again the p-value = 0, so it is impossible that there is not a correlation between income and gender.
+- native_country: The p-value is well below 0.01, therefore I conclude there is strong evidence for correlation between native country and income.
+
+```
+CrossTable(adult$workclass, i, chisq = TRUE)
+CrossTable(adult$education, i, chisq = TRUE)
+CrossTable(adult$marital_status, i, chisq = TRUE)
+CrossTable(adult$occupation, i, chisq = TRUE)
+CrossTable(adult$family_role, i, chisq = TRUE)
+CrossTable(adult$ethnicity, i, chisq = TRUE)
+CrossTable(adult$gender, i, chisq = TRUE)
+CrossTable(adult$native_country, i, chisq = TRUE)
+```
+For all variables excepting 'final_weight', I conclude that we must reject the null hypothesis and that there is a correlation between the variables and 'income'. I also found an undeniable correlation between the variable 'gender' and the variables 'family_role', 'occupation', & 'marital_status' due to the p-value being zero. However, females are underrepresented in the dataset./
+
+I will remove the following attributes:  
+
+- **final_weight**: There is not a correlation and it is not relevant other than being representative of the number of people in the census.
+- **education**: This is numerically represented by 'years_education' and knn works better with numeric variables.
+- **family_role**: This feature can be represented by other features, such as 'marital_status' and has a direct correlation to 'gender' so I feel it is redundant.
+- **investment_gain**: There is a correlation with 'income', but I believe 'income' is the predictor and not vice versa.
+- **investment_loss**: Same as 'investment_gain'.
+
+```{r}
+adult <- adult[-c(3:4, 8, 11:12)]
+str(adult)
+```
+
+**Data Preparation:**
+
+**Change the "?" characters that representative of null values to NA:**
+
+I did this when I loaded the datatset using na.string:  
+```
+adult <- read.table("adult.data", header = FALSE, sep = ",", strip.white = TRUE, na.string = "?")
+```
+**Find the number of missing values in each column:**
+
+There are three columns with missing values:
+- workclass (1836)
+- occupation (1843)
+- native_county (583)
+
+```{r}
+colSums(is.na(adult))
+```
+
+**Dealing with missing values with imputation (using mean for numerical & mode for categorical):**
+
+The columns with missing values are all categorical. If we were imputing a numeric column we would use mean(variable, na.rm = TRUE) to find the mean (or aggregate() in the case of subgroups). In this case, I will write a function to find the mode and then apply the function to all missing values and impute the mode for that column.  
+
+```{r}
+findmode <- function(x) {
+     ux <- unique(x) 
+     ux[which.max(tabulate(match(x, ux)))]
+}
+
+findmode(adult$workclass)
+findmode(adult$occupation)
+findmode(adult$native_country)
+
+adult[is.na(adult)] <- findmode(adult[!is.na(adult)])
+colSums(is.na(adult))
+```
+
+**Dealing with categorical values using one-hot-encoding:**
+
+In order to do one-hot-encoding, I converted the categorical variables (except 'income') to a factor and converted to a data.table. Once converted back to a data.frame, I then factored the 'income' variable. I factored 'income' last to prevent it from being one-hot encoded.  
+
+```{r}
+library(data.table)
+library(mltools)
+
+adult$workclass <- factor(adult$workclass)
+adult$marital_status <- factor(adult$marital_status)
+adult$occupation <- factor(adult$occupation)
+adult$ethnicity <- factor(adult$ethnicity)
+adult$gender <- factor(adult$gender)
+adult$native_country <- factor(adult$native_country)
+
+adult_t <- as.data.table(adult)
+adult_t <- one_hot(adult_t, cols = "auto", dropCols = TRUE, dropUnusedLevels = TRUE)
+adult <- as.data.frame(adult_t)
+adult$income <- factor(adult$income)
+```
+
+**Training and Evaluation of ML Models:**
+
+**Set the seed of the random number generator to a fixed integer:**
+
+```{r}
+set.seed(1)
+```
+
+**Scale all numeric features using Min-Max Scaling:**
+
+Normalizing the numeric attributes with min-max scaling by writing a min-max function:
+
+```{r}
+min_max <- function(x) {
+  return ((x-min(x)) / (max(x)-min(x)))
+}
+
+adult$age <- min_max(adult$age)
+adult$years_education <- min_max(adult$years_education)
+adult$hours_per_week <- min_max(adult$hours_per_week)
+```
+
+**Randomize Order of Rows:**
+
+```{r}
+adult <- adult[sample(nrow(adult), replace = FALSE), ]
+```
+
+**Use 5-fold cross validation with KNN to predict the "income" variable and report the cross-validation error:"**
+
+Using the 5-fold cross-validation error function (k = sqrt(n)), we find the estimate of knn error on the 'income' data to be 0.1673782.  
+
+```{r}
+library(class)
+library(caret)
+
+adult_train <- adult[1:26048, -83]
+adult_test <- adult[26049:32561, -83]
+adult_train_labels <- adult[1:26048, 83]
+adult_test_labels <- adult[26049:32561, 83]
+
+adult_test_pred <- knn(train = adult_train, test = adult_test, cl = adult_train_labels, k = 180)
+
+CrossTable(x = adult_test_labels, y = adult_test_pred, prop.chisq = FALSE)
+
+folds = createFolds(adult$income, k = 5)
+str(folds)
+
+knn_fold = function(features, target, fold, k) {
+  train = features[-fold,]
+  validation = features[fold,]
+  train_labels = target[-fold]
+  validation_labels = target[fold]
+  validation_preds = knn(train, validation, train_labels, k = k)
+  t = table(validation_labels, validation_preds)
+  error = (t[1,2] + t[2,1])/(t[1,1] + t[1,2] + t[2,1] + t[2,2])
+  return(error)
+}
+
+crossValidationError = function(features, target, k) {
+  folds = createFolds(target, k = 5)
+  errors = sapply(folds, knn_fold, features = features, target = target, k = k)
+  return (mean(errors))
+}
+
+crossValidationError(adult[,-83], adult[,83], 180)
+```
+
+**Tune K by trying different values:**
+
+```{r}
+ks <- c(1, 5, 10, 20, 50, 100, 180)
+errors <- sapply(ks, crossValidationError, features = adult[,-83], target = adult[,83])
+errors
+
+plot(errors~ks, main="Cross Validation Errors", xlab="k", ylab="CVError")
+lines(errors~ks)
+```
+
+Results:
+- *k = 1:* 0.2120635
+- *k = 5:* 0.1803383
+- *k = 10:* 0.1701728
+- *k = 20:* 0.1651361
+- *k = 50:* 0.1644606 
+- *k = 100:* 0.1660884
+- *k = sqrt(n) = 180(floor):* 0.1675011
+
+K = 50 provides the lowest cross-validation error.  
+
+**Use 5-fold cross validation with KNN to predict the income variable and report the average false positive rate (FPR) and false negative rate (FNR) of the classifier:**
+
+```{r}
+false_knn_fold = function(features, target, fold, k) {
+  train = features[-fold,]
+  validation = features[fold,]
+  train_labels = target[-fold]
+  validation_labels = target[fold]
+  validation_preds = knn(train, validation, train_labels, k = 5)
+  t = table(validation_labels, validation_preds)
+  FPR = t[1,2]/(t[1,2]+t[1,1])
+  FNR = t[2,1]/(t[2,1]+t[2,2])
+  return (c("FPR"=FPR, "FNR"=FNR))
+}
+
+false_crossValidationError = function(features, target, k) {
+  folds = createFolds(target, k = 5)
+  errors = sapply(folds, false_knn_fold, features = features, target = target, k = 5)
+  return (rowMeans(errors))
+}
+
+false_errors <- false_crossValidationError(adult[,-83], adult[,83], 50)
+
+false_errors
+```
+
+### Applying Naive Bayes Classifier to Predict Income
+
+**Set the seed:**
+```
+set.seed(1)
+```
+
+**Decide which features to keep and which to remove:**
+
+For Problem 2, I am reading the dataset in, changing column names, and imputing the missing values as was done for Problem 1:  
+
+```{r}
+nb_adult <- read.table("adult.data", header = FALSE, sep = ",", strip.white = TRUE, na.string = "?", stringsAsFactors = FALSE)
+
+colnames(nb_adult) <-c("age", "workclass", "final_weight", "education", "years_education", "marital_status", "occupation", "family_role", "ethnicity", "gender", "investment_gain", "investment_loss", "hours_per_week", "native_country", "income")
+
+nb_adult[is.na(nb_adult)] <- findmode(nb_adult[!is.na(nb_adult)])
+```
+
+Similarly to Problem 1, I will remove 'final_weight', 'investment_gain', 'investment_loss', and 'family_role', but instead of removing 'education' - I will remove 'years_education' instead. This is because Naive Bayes doesn't work with numerical values. I then convert the existing numerical columns to categorical variables.  
+
+```{r}
+nb_adult <- nb_adult[-c(3, 5, 8, 11:12)]
+
+age_bp <- c(-Inf, 19, 29, 39, 49, 59, 69, 79, Inf)
+labels_age_bp <- c("15-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70-79", "80+")
+nb_adult$age <- cut(nb_adult$age, breaks = age_bp, labels = labels_age_bp)
+
+hours_bp <- c(-Inf, 35, 45, Inf)
+labels_hours_bp <- c("Part-Time", "Full-Time", "Over-Time")
+nb_adult$hours_per_week <- cut(nb_adult$hours_per_week, breaks = hours_bp, labels = labels_hours_bp)
+
+nb_adult$workclass <- factor(nb_adult$workclass)
+nb_adult$education <- factor(nb_adult$education)
+nb_adult$marital_status <- factor(nb_adult$marital_status)
+nb_adult$occupation <- factor(nb_adult$occupation)
+nb_adult$ethnicity <- factor(nb_adult$ethnicity)
+nb_adult$gender <- factor(nb_adult$gender)
+nb_adult$native_country <- factor(nb_adult$native_country)
+nb_adult$income <- factor(nb_adult$income)
+
+str(nb_adult)
+library(e1071)
+library(caret)
+```
+
+**Use 5-fold cross validation with Naive Bayes to predict the "income" variable and report the cross-validation error:**
+
+
+```{r}
+nb_adult <- nb_adult[sample(nrow(nb_adult), replace = FALSE), ]
+
+nb_adult_train <- nb_adult[1:26048, -10]
+nb_adult_test <- nb_adult[26049:32561, -10]
+nb_adult_train_labels <- nb_adult[1:26048, 10]
+nb_adult_test_labels <- nb_adult[26049:32561, 10]
+
+nb_classifier <- naiveBayes(nb_adult_train, nb_adult_train_labels)
+nb_adult_test_pred <- predict(nb_classifier, nb_adult_test)
+
+CrossTable(nb_adult_test_pred, nb_adult_test_labels, prop.chisq = FALSE, prop.t = FALSE, dnn = c('predicted', 'actual'))
+
+nb_folds <- createFolds(nb_adult$income, k = 5)
+
+naiveBayes_fold = function(fold, features, target, laplace = 0) {
+    train = features[-fold,]
+    validation = features[fold,]
+    train_labels = target[-fold]
+    validation_labels = target[fold]
+    NaiveBayes_model = naiveBayes(train, train_labels, laplace = laplace)
+    validation_preds = predict(NaiveBayes_model, validation)
+    t = table(validation_labels, validation_preds)
+    error = (t[1,2] + t[2,1])/(t[1,1] + t[1,2] + t[2,1] + t[2,2])
+    return(error)
+}
+
+nb_crossValidationError = function(features, target, laplace = 0, n_folds) {
+  folds = createFolds(target, k = 5)
+  errors = sapply(folds, naiveBayes_fold, features = features, target = target, laplace = laplace)
+  return (mean(errors))
+}
+```
+The cross-validation error:  
+```{r}
+nb_crossValidationError(nb_adult[,-10], nb_adult[,10], 50)
+```
+
+```
+nb_errors <- sapply(ks, nb_crossValidationError, features = nb_adult[,-10], target = nb_adult[,10])
+nb_errors
+```
+
+**Compare the cross validation error of Naive Bayes with that of KNN. Which performs better on this dataset?**
+
+The cross-validation error using the KNN algorithm is 0.1673782, while the cross-validation algorithm using Naive Bayes classifier is 0.1851604. Therefore, I would say that KNN performs better on the adult dataset.  
+
+**Compare the False Positive Rate and False Negative Rate of Naive Bayes:**
+
+Similarly to the question for KNN, FNR of the majority classifier would be much improved over the FNR of the the Naive Bayes classifier, but not the FPR.The False Positive Rate for the majority classifier would be all of the records where income is >50K, approx. 24%, but the False Negative Rate would be 0 if all records are classified as the majority class (<=50K).  
+
+
+```{r}
+false_naiveBayes_fold = function(fold, features, target, laplace = 0) {
+  train = features[-fold,]
+  validation = features[fold,]
+  train_labels = target[-fold]
+  validation_labels = target[fold]
+  NaiveBayes_model = naiveBayes(train, train_labels, laplace = laplace)
+  validation_preds = predict(NaiveBayes_model, validation)
+  t = table(validation_labels, validation_preds)
+  FPR = t[1,2]/(t[1,2]+t[1,1])
+  FNR = t[2,1]/(t[2,1]+t[2,2])
+  return (c("FPR"=FPR, "FNR"=FNR))
+}
+
+false_nb_crossValidationError = function(features, target, laplace = 0, n_folds) {
+  folds = createFolds(target, k = 5)
+  errors = sapply(folds, false_naiveBayes_fold, features = features, target = target, laplace = laplace)
+  return (rowMeans(errors))
+}
+
+nb_false_errors <- false_nb_crossValidationError(features = rbind(nb_adult_train, nb_adult_test), target = nb_adult$income, n_folds = 5)
+
+nb_false_errors
+
+lc_errors <- false_nb_crossValidationError(features = rbind(nb_adult_train, nb_adult_test), target = nb_adult$income, n_folds=5, laplace = 1)
+
+lc_errors
+```
+
+### Testing results with undersampling:
+
+*Undersampling the Majority Class:*
+
+Using undersampling and K tuned to 50 to balance the dataset, the KNN cross-validation error is 0.2035451 and the Naive Bayes cross-validation error is 0.2056501. Balancing the dataset through undersampling does not improve the CVE of this particular dataset.  
+KNN:  
+```
+undersampling <- read.table("adult.data", header = FALSE, sep = ",", strip.white = TRUE, na.string = "?")
+
+colnames(undersampling) <-c("age", "workclass", "final_weight", "education", "years_education", "marital_status", "occupation", "family_role", "ethnicity", "gender", "investment_gain", "investment_loss", "hours_per_week", "native_country", "income")
+undersampling <- undersampling[-c(3:4, 8, 11:12)]
+undersampling[is.na(undersampling)] <- findmode(undersampling[!is.na(undersampling)])
+
+less_fifty <- which(undersampling$income == "<=50K")
+greater_fifty <- which(undersampling$income == ">50K")
+nsamp <- 7841
+pick_less <- sample(less_fifty, nsamp)
+pick_greater <- sample(greater_fifty, nsamp)
+
+new_under <- undersampling[c(pick_less, pick_greater), ]
+table(new_under$income)
+
+library(data.table)
+library(mltools)
+
+new_under$workclass <- factor(new_under$workclass)
+new_under$marital_status <- factor(new_under$marital_status)
+new_under$occupation <- factor(new_under$occupation)
+new_under$ethnicity <- factor(new_under$ethnicity)
+new_under$gender <- factor(new_under$gender)
+new_under$native_country <- factor(new_under$native_country)
+ 
+newUnder_t <- as.data.table(new_under)
+newUnder_t <- one_hot(newUnder_t, cols = "auto", dropCols = TRUE, dropUnusedLevels = TRUE)
+new_under <- as.data.frame(newUnder_t)
+
+new_under$income <- factor(new_under$income)
+new_under$age <- min_max(new_under$age)
+new_under$years_education <- min_max(new_under$years_education)
+new_under$hours_per_week <- min_max(new_under$hours_per_week)
+
+set.seed(1)
+new_under <- new_under[sample(nrow(new_under), replace = FALSE), ]
+
+nu_train <- new_under[1:3136, -83]
+nu_test <- new_under[3137:15682, -83]
+nu_train_labels <- new_under[1:3136, 83]
+nu_test_labels <- new_under[3137:15682, 83]
+ 
+nu_test_pred <- knn(train = nu_train, test = nu_test, cl = nu_train_labels, k = 125)
+CrossTable(x = nu_test_labels, y = nu_test_pred, prop.chisq = FALSE)
+
+folds = createFolds(new_under$income, k = 5)
+
+ks <- c(1, 5, 10, 20, 50, 100, 125)
+nu_errors <- sapply(ks, crossValidationError, features = new_under[,-83], target = new_under[,83])
+nu_errors
+
+#[1] 0.2537301 0.2147046 0.2083915 0.2059692 0.2035451 0.2087107 0.2109426
+```
+Naive Bayes:
+```
+nb_under <- read.table("adult.data", header = FALSE, sep = ",", strip.white = TRUE, na.string = "?", stringsAsFactors = FALSE)
+
+colnames(nb_under) <-c("age", "workclass", "final_weight", "education", "years_education", "marital_status", "occupation", "family_role", "ethnicity", "gender", "investment_gain", "investment_loss", "hours_per_week", "native_country", "income")
+nb_under[is.na(nb_under)] <- findmode(nb_under[!is.na(nb_under)])
+nb_under <- nb_under[-c(3, 5, 8, 11:12)]
+
+nbless_fifty <- which(nb_under$income == "<=50K")
+nbgreater_fifty <- which(nb_under$income == ">50K")
+nsamp <- 7841
+nbpick_less <- sample(nbless_fifty, nsamp)
+nbpick_greater <- sample(nbgreater_fifty, nsamp)
+
+nb_under <- nb_under[c(nbpick_less, nbpick_greater), ]
+table(nb_under$income)
+
+age_bp <- c(-Inf, 19, 29, 39, 49, 59, 69, 79, Inf)
+labels_age_bp <- c("15-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70-79", "80+")
+nb_under$age <- cut(nb_under$age, breaks = age_bp, labels = labels_age_bp)
+
+hours_bp <- c(-Inf, 35, 45, Inf)
+labels_hours_bp <- c("Part-Time", "Full-Time", "Over-Time")
+nb_under$hours_per_week <- cut(nb_under$hours_per_week, breaks = hours_bp, labels = labels_hours_bp)
+
+nb_under$workclass <- factor(nb_under$workclass)
+nb_under$education <- factor(nb_under$education)
+nb_under$marital_status <- factor(nb_under$marital_status)
+nb_under$occupation <- factor(nb_under$occupation)
+nb_under$ethnicity <- factor(nb_under$ethnicity)
+nb_under$gender <- factor(nb_under$gender)
+nb_under$native_country <- factor(nb_under$native_country)
+nb_under$income <- factor(nb_under$income)
+library(e1071)
+library(caret)
+
+nb_under <- nb_under[sample(nrow(nb_under), replace = FALSE), ]
+
+nb_under_train <- nb_under[1:3136, -10]
+nb_under_test <- nb_under[3137:32561, -10]
+nb_under_train_labels <- nb_under[1:3136, 10]
+nb_under_test_labels <- nb_under[3137:32561, 10]
+
+nb_u_classifier <- naiveBayes(nb_under_train, nb_under_train_labels)
+nb_under_test_pred <- predict(nb_u_classifier, nb_under_test)
+
+CrossTable(nb_under_test_pred, nb_under_test_labels, prop.chisq = FALSE, prop.t = FALSE, dnn = c('predicted', 'actual'))
+
+nb_under_folds <- createFolds(nb_under$income, k = 5)
+nb_crossValidationError(nb_under[,-10], nb_under[,10], 50)
+#[1] 0.2056501
+```
